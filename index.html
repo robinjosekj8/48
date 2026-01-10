@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StreamHub</title>
+    <link rel="stylesheet" href="assets/css/style.css">
+</head>
+
+<body>
+    <div class="tv-frame">
+        <div class="tv-screen">
+            <header class="header">
+                <!-- Placeholder for logo, user can add assets/images/logo.png -->
+                <h1 class="title">Caffe Screen</h1>
+            </header>
+
+            <div class="menu-list">
+                <!-- Video Streams -->
+                <a href="viewer.html?source=content/stream1&type=video" class="menu-card">
+                    <div class="preview-box">
+                        <video src="content/stream1/1.mp4" autoplay loop muted playsinline></video>
+                    </div>
+                    <div class="card-title">Video Stream</div>
+                    <div class="card-desc">content/stream1</div>
+                </a>
+
+
+
+                <!-- Photo Collections -->
+                <a href="viewer.html?source=content/collection1&type=image" class="menu-card">
+                    <div class="preview-box">
+                        <!-- Try png or jpg - defaulting to 1.png for preview, can be adjusted -->
+                        <img src="content/collection1/1.png" onerror="this.src='content/collection1/1.jpg'"
+                            alt="Preview">
+                    </div>
+                    <div class="card-title">Image 1</div>
+                    <div class="card-desc">content/collection1</div>
+                </a>
+
+                <a href="viewer.html?source=content/collection2&type=image" class="menu-card">
+                    <div class="preview-box">
+                        <img src="content/collection2/1.png" onerror="this.src='content/collection2/1.jpg'"
+                            alt="Preview">
+                    </div>
+                    <div class="card-title">Image 2</div>
+                    <div class="card-desc">content/collection2</div>
+                </a>
+
+
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>
