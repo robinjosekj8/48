@@ -144,7 +144,8 @@ body.viewer-page {
 }
 
 .viewer-page video,
-.viewer-page img {
+.viewer-page img,
+.viewer-page iframe {
     width: 100%;
     height: 100%;
     object-fit: contain;
