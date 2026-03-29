@@ -1,41 +1,75 @@
 document.addEventListener('DOMContentLoaded', () => {
-    // ── STABILITY: PERIODIC PAGE RELOAD ──────────────────────────────────────────
-    const FOUR_HOURS = 4 * 60 * 60 * 1000;
-    setTimeout(() => window.location.reload(), FOUR_HOURS);
 
-    const params = new URLSearchParams(window.location.search);
+    // ── STABILITY: PERIODIC PAGE RELOAD ──────────────────────────────────────
+    // Randomise ±10 min so multiple screens don't all reload at the same time.
+    // We also wait for the page to be hidden (user not watching) when possible.
+    const BASE_RELOAD_MS   = 4 * 60 * 60 * 1000;          // 4 hours
+    const JITTER_MS        = Math.floor(Math.random() * 20 * 60 * 1000) - 10 * 60 * 1000;
+    const RELOAD_AFTER_MS  = BASE_RELOAD_MS + JITTER_MS;   // 3h50m – 4h10m
+
+    let reloadPending = false;
+    setTimeout(() => {
+        reloadPending = true;
+        // Reload immediately if the page is hidden (screen off / tab in background).
+        // Otherwise wait for the next content-swap moment (handled in playVideoUrl / startSlideshow).
+        if (document.visibilityState === 'hidden') {
+            window.location.reload();
+        }
+        // Fallback: force reload after another 10 minutes even if page stays visible.
+        setTimeout(() => window.location.reload(), 10 * 60 * 1000);
+    }, RELOAD_AFTER_MS);
+
+    // ── URL PARAMS ───────────────────────────────────────────────────────────
+    const params     = new URLSearchParams(window.location.search);
     const sourcePath = params.get('source');
-    const type = params.get('type') || 'video';
-    const container = document.getElementById('content-container');
+    const type       = params.get('type') || 'video';
+    const container  = document.getElementById('content-container');
 
     if (!sourcePath) return;
 
-    let activeContentKey = ''; // Stores the URL or image list signature to detect changes
+    let activeContentKey = '';   // URL or image-list signature to detect changes
+    let fetchErrorCount  = 0;    // Consecutive fetch failures
+    const MAX_FETCH_ERRORS = 3;  // Soft-recover after this many in a row
 
-    // ── WATCHER CORE ────────────────────────────────────────────────────────────
+    // ── WATCHER CORE ─────────────────────────────────────────────────────────
     async function checkForUpdates() {
         if (type === 'video') {
             try {
                 const res = await fetch(`${sourcePath}/url.txt?t=${Date.now()}`);
                 if (res.ok) {
                     const url = (await res.text()).trim();
+                    fetchErrorCount = 0;  // Reset on success
                     if (url && url !== activeContentKey) {
                         activeContentKey = url;
                         playVideoUrl(url);
+                    } else if (url && url === activeContentKey) {
+                        // Same URL — check if the iframe/video has stalled
+                        checkForStall();
                     }
                 } else {
-                    // Fallback to local 1.mp4 if url.txt is missing/removed
+                    // url.txt missing — fall back to local 1.mp4
+                    fetchErrorCount = 0;
                     const localUrl = `${sourcePath}/1.mp4`;
                     if (localUrl !== activeContentKey) {
                         activeContentKey = localUrl;
                         playVideoUrl(localUrl);
+                    } else {
+                        checkForStall();
                     }
                 }
-            } catch (err) { console.warn("Update check failed", err); }
+            } catch (err) {
+                console.warn('Update check failed:', err);
+                fetchErrorCount++;
+                if (fetchErrorCount >= MAX_FETCH_ERRORS) {
+                    console.warn(`${MAX_FETCH_ERRORS} consecutive fetch errors — soft-recovering…`);
+                    fetchErrorCount = 0;
+                    softRecover();
+                }
+            }
         } else {
-            // Image mode update check
+            // Image mode — re-probe only if we haven't loaded yet or content may have changed
             const newList = await probeImages();
-            const newKey = newList.join(',');
+            const newKey  = newList.join(',');
             if (newKey !== activeContentKey) {
                 activeContentKey = newKey;
                 startSlideshow(newList);
@@ -43,79 +77,214 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // ── VIDEO PLAYER ─────────────────────────────────────────────────────────────
+    // ── STALL DETECTION ──────────────────────────────────────────────────────
+    // Tracks the last time we swapped content. If the same URL has been
+    // showing for over 20 minutes we assume the iframe/video stalled and
+    // reload it in-place (no DOM flash, no full page reload).
+    let lastContentSwapTime = Date.now();
+    const STALL_THRESHOLD_MS = 20 * 60 * 1000; // 20 minutes
+
+    function markContentSwap() {
+        lastContentSwapTime = Date.now();
+    }
+
+    function checkForStall() {
+        const age = Date.now() - lastContentSwapTime;
+        if (age > STALL_THRESHOLD_MS) {
+            console.warn('Stall detected — reloading content in-place');
+            softRecover();
+        }
+    }
+
+    // Soft recovery: reload the current content without a full page reload.
+    function softRecover() {
+        if (!activeContentKey) return;
+        if (type === 'video') {
+            const currentKey = activeContentKey;
+            activeContentKey = '';          // Force re-render
+            playVideoUrl(currentKey);
+        } else {
+            const currentKey  = activeContentKey;
+            activeContentKey  = '';
+            startSlideshow(currentKey.split(',').filter(Boolean));
+        }
+    }
+
+    // ── VIDEO PLAYER ─────────────────────────────────────────────────────────
+    // We keep a single DOM element alive and swap src rather than
+    // rebuilding innerHTML every call — this prevents GPU/memory churn.
+    let currentVideoEl  = null;
+    let currentIframeEl = null;
+
     function playVideoUrl(url) {
-        container.innerHTML = '';
-        const ytMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?|shorts)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+        markContentSwap();
+        if (reloadPending) { window.location.reload(); return; }
+
+        const ytMatch = url.match(
+            /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?|shorts)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i
+        );
 
         if (ytMatch) {
             const videoId = ytMatch[1];
+            const newSrc  = `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&controls=0&loop=1&playlist=${videoId}&rel=0`;
+
+            // Reuse existing iframe if one already exists to avoid DOM thrash
+            if (currentIframeEl && container.contains(currentIframeEl)) {
+                if (currentIframeEl.src !== newSrc) {
+                    currentIframeEl.src = newSrc;
+                }
+                return;
+            }
+
+            // First time — clear container and build iframe
+            clearContainer();
             const iframe = document.createElement('iframe');
-            iframe.src = `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&controls=0&loop=1&playlist=${videoId}`;
-            iframe.style.cssText = 'width:100%;height:100%;border:none;display:block;background:#000;';
-            iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture';
+            iframe.src     = newSrc;
+            iframe.style.cssText = 'width:100%;height:100%;border:none;display:block;background:#000;opacity:0;transition:opacity 0.5s ease-in-out;';
+            iframe.allow   = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture';
+            iframe.setAttribute('allowfullscreen', '');
+
+            // Fade in via onload (most reliable for iframes) + rAF fallback
+            iframe.onload = () => { iframe.style.opacity = '1'; };
             container.appendChild(iframe);
-            requestAnimationFrame(() => requestAnimationFrame(() => iframe.classList.add('media-visible')));
+            requestAnimationFrame(() =>
+                requestAnimationFrame(() => { iframe.style.opacity = '1'; })
+            );
+
+            currentIframeEl = iframe;
+            currentVideoEl  = null;
             return;
         }
 
-        const video = document.createElement('video');
-        video.src = url;
-        video.autoplay = video.loop = video.muted = true;
-        video.style.cssText = 'width:100%;height:100%;object-fit:contain;display:block;';
+        // ── LOCAL VIDEO ───────────────────────────────────────────────────────
+        if (currentVideoEl && container.contains(currentVideoEl)) {
+            if (currentVideoEl.src !== new URL(url, location.href).href) {
+                currentVideoEl.src = url;
+                currentVideoEl.load();
+                currentVideoEl.play().catch(e => console.warn('Autoplay blocked:', e));
+            }
+            return;
+        }
+
+        clearContainer();
+        const video        = document.createElement('video');
+        video.src          = url;
+        video.autoplay     = true;
+        video.loop         = true;
+        video.muted        = true;
+        video.playsInline  = true;   // Prevents kiosk/mobile from hijacking fullscreen
+        video.style.cssText = 'width:100%;height:100%;object-fit:contain;display:block;opacity:0;transition:opacity 0.5s ease-in-out;';
         container.appendChild(video);
-        requestAnimationFrame(() => requestAnimationFrame(() => video.classList.add('media-visible')));
-        video.play().catch(err => console.warn('Autoplay blocked:', err));
+        requestAnimationFrame(() =>
+            requestAnimationFrame(() => { video.style.opacity = '1'; })
+        );
+        video.play().catch(e => console.warn('Autoplay blocked:', e));
+
+        currentVideoEl  = video;
+        currentIframeEl = null;
     }
 
-    // ── IMAGE PROBER ─────────────────────────────────────────────────────────────
+    // ── IMAGE PROBER ─────────────────────────────────────────────────────────
+    // Explicitly nulls out each Image object after use to release memory.
     async function probeImages() {
         const extensions = ['png', 'jpg', 'jpeg', 'gif'];
-        const found = [];
+        const found      = [];
+
         for (let i = 1; i <= 100; i++) {
             let foundThisIndex = false;
+
             for (const ext of extensions) {
-                const path = `${sourcePath}/${i}.${ext}`;
+                const path   = `${sourcePath}/${i}.${ext}?t=${Date.now()}`;
                 const exists = await new Promise(resolve => {
-                    const img = new Image();
-                    img.onload = () => resolve(true);
-                    img.onerror = () => resolve(false);
-                    img.src = path;
+                    let probe    = new Image();
+                    probe.onload  = () => { probe = null; resolve(true);  };
+                    probe.onerror = () => { probe = null; resolve(false); };
+                    probe.src     = path;
                 });
+
                 if (exists) {
-                    found.push(path);
+                    // Store path without cache-bust so the actual <img> loads clean
+                    found.push(`${sourcePath}/${i}.${ext}`);
                     foundThisIndex = true;
                     break;
                 }
             }
-            if (!foundThisIndex) break; // Stop at first missing number
+
+            if (!foundThisIndex) break; // Stop at first gap
         }
+
         return found;
     }
 
-    // ── SLIDESHOW ────────────────────────────────────────────────────────────────
+    // ── SLIDESHOW ────────────────────────────────────────────────────────────
+    // Reuses a single <img> element — swaps src only — instead of destroying
+    // and recreating a DOM node on every 5-second tick.
     let slideshowTimer = null;
+    let slideshowImg   = null;
+
     function startSlideshow(playlist) {
-        if (slideshowTimer) clearInterval(slideshowTimer);
-        if (playlist.length === 0) {
-            container.innerHTML = '<p style="color:white;">No images found</p>';
+        markContentSwap();
+        if (reloadPending) { window.location.reload(); return; }
+
+        if (slideshowTimer) {
+            clearInterval(slideshowTimer);
+            slideshowTimer = null;
+        }
+
+        if (!playlist || playlist.length === 0) {
+            clearContainer();
+            const msg = document.createElement('p');
+            msg.textContent = 'No images found';
+            msg.style.color = 'white';
+            container.appendChild(msg);
+            slideshowImg = null;
             return;
         }
+
+        // Build or reuse the <img> element
+        if (!slideshowImg || !container.contains(slideshowImg)) {
+            clearContainer();
+            slideshowImg = document.createElement('img');
+            slideshowImg.style.cssText = 'width:100%;height:100%;object-fit:contain;display:block;opacity:0;transition:opacity 0.5s ease-in-out;';
+            container.appendChild(slideshowImg);
+        }
+
+        currentVideoEl  = null;
+        currentIframeEl = null;
+
         let idx = 0;
         const showNext = () => {
-            container.innerHTML = '';
-            const img = document.createElement('img');
-            img.src = playlist[idx % playlist.length];
-            img.style.cssText = 'width:100%;height:100%;object-fit:contain;display:block;';
-            container.appendChild(img);
-            requestAnimationFrame(() => requestAnimationFrame(() => img.classList.add('media-visible')));
+            const nextSrc = playlist[idx % playlist.length];
             idx++;
+
+            // Fade out → swap src → fade in (avoids flash between images)
+            slideshowImg.style.opacity = '0';
+            setTimeout(() => {
+                slideshowImg.src = nextSrc;
+                slideshowImg.onload = () => { slideshowImg.style.opacity = '1'; };
+                // Fallback fade-in if onload already fired (cached image)
+                requestAnimationFrame(() =>
+                    requestAnimationFrame(() => { slideshowImg.style.opacity = '1'; })
+                );
+            }, 300); // Wait for fade-out before swapping
         };
+
         showNext();
-        if (playlist.length > 1) slideshowTimer = setInterval(showNext, 5000);
+        if (playlist.length > 1) {
+            slideshowTimer = setInterval(showNext, 5000);
+        }
     }
 
-    // Initialize and Start Watcher
+    // ── DOM HELPER ───────────────────────────────────────────────────────────
+    // Safe container clear that nulls our element refs.
+    function clearContainer() {
+        container.innerHTML = '';
+        currentVideoEl  = null;
+        currentIframeEl = null;
+        slideshowImg    = null;
+    }
+
+    // ── INIT ─────────────────────────────────────────────────────────────────
     checkForUpdates();
-    setInterval(checkForUpdates, 60000); // Check for hardware/content updates every 60s
+    setInterval(checkForUpdates, 60_000); // Poll for content changes every 60s
 });
