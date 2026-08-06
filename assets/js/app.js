@@ -30,49 +30,56 @@ document.addEventListener('DOMContentLoaded', () => {
     let activeContentKey = '';   // URL or image-list signature to detect changes
     let fetchErrorCount  = 0;    // Consecutive fetch failures
     const MAX_FETCH_ERRORS = 3;  // Soft-recover after this many in a row
+    let currentMode      = type; // Track active display mode
 
     // ── WATCHER CORE ─────────────────────────────────────────────────────────
     async function checkForUpdates() {
-        if (type === 'video') {
-            try {
-                const res = await fetch(`${sourcePath}/url.txt?t=${Date.now()}`);
-                if (res.ok) {
-                    const url = (await res.text()).trim();
-                    fetchErrorCount = 0;  // Reset on success
-                    if (url && url !== activeContentKey) {
+        try {
+            // First, always check for url.txt regardless of the original 'type'
+            const res = await fetch(`${sourcePath}/url.txt?t=${Date.now()}`);
+            if (res.ok) {
+                const url = (await res.text()).trim();
+                fetchErrorCount = 0;  // Reset on success
+                if (url) {
+                    currentMode = 'video';
+                    if (url !== activeContentKey) {
                         activeContentKey = url;
                         playVideoUrl(url);
-                    } else if (url && url === activeContentKey) {
+                    } else {
                         // Same URL — check if the iframe/video has stalled
                         checkForStall();
                     }
-                } else {
-                    // url.txt missing — fall back to local 1.mp4
-                    fetchErrorCount = 0;
-                    const localUrl = `${sourcePath}/1.mp4`;
-                    if (localUrl !== activeContentKey) {
-                        activeContentKey = localUrl;
-                        playVideoUrl(localUrl);
-                    } else {
-                        checkForStall();
-                    }
-                }
-            } catch (err) {
-                console.warn('Update check failed:', err);
-                fetchErrorCount++;
-                if (fetchErrorCount >= MAX_FETCH_ERRORS) {
-                    console.warn(`${MAX_FETCH_ERRORS} consecutive fetch errors — soft-recovering…`);
-                    fetchErrorCount = 0;
-                    softRecover();
+                    return; // Stop here if url.txt has a valid URL
                 }
             }
-        } else {
-            // Image mode — re-probe only if we haven't loaded yet or content may have changed
-            const newList = await probeImages();
-            const newKey  = newList.join(',');
-            if (newKey !== activeContentKey) {
-                activeContentKey = newKey;
-                startSlideshow(newList);
+            
+            // If url.txt doesn't exist or is empty, fallback to original type logic
+            fetchErrorCount = 0;
+            if (type === 'video') {
+                currentMode = 'video';
+                const localUrl = `${sourcePath}/1.mp4`;
+                if (localUrl !== activeContentKey) {
+                    activeContentKey = localUrl;
+                    playVideoUrl(localUrl);
+                } else {
+                    checkForStall();
+                }
+            } else {
+                currentMode = 'image';
+                const newList = await probeImages();
+                const newKey  = newList.join(',');
+                if (newKey !== activeContentKey) {
+                    activeContentKey = newKey;
+                    startSlideshow(newList);
+                }
+            }
+        } catch (err) {
+            console.warn('Update check failed:', err);
+            fetchErrorCount++;
+            if (fetchErrorCount >= MAX_FETCH_ERRORS) {
+                console.warn(`${MAX_FETCH_ERRORS} consecutive fetch errors — soft-recovering…`);
+                fetchErrorCount = 0;
+                softRecover();
             }
         }
     }
@@ -99,7 +106,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Soft recovery: reload the current content without a full page reload.
     function softRecover() {
         if (!activeContentKey) return;
-        if (type === 'video') {
+        if (currentMode === 'video') {
             const currentKey = activeContentKey;
             activeContentKey = '';          // Force re-render
             playVideoUrl(currentKey);
