@@ -3,15 +3,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // ── STABILITY: DISABLED (Run offline, do not reload) ─────────────────────
 
     // ── URL PARAMS ───────────────────────────────────────────────────────────
-    const params     = new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(window.location.search);
     const sourcePath = params.get('source');
-    const type       = params.get('type') || 'video';
-    const container  = document.getElementById('content-container');
+    const type = params.get('type') || 'video';
+    const container = document.getElementById('content-container');
 
     if (!sourcePath) return;
 
     let activeContentKey = '';   // URL or image-list signature to detect changes
-    let currentMode      = type; // Track active display mode
+    let currentMode = type; // Track active display mode
 
     // ── WATCHER CORE ─────────────────────────────────────────────────────────
     async function checkForUpdates() {
@@ -29,7 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     return; // Stop here if url.txt has a valid URL
                 }
             }
-            
+
             // If url.txt doesn't exist or is empty, fallback to original type logic
             if (type === 'video') {
                 currentMode = 'video';
@@ -41,7 +41,7 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 currentMode = 'image';
                 const newList = await probeImages();
-                const newKey  = newList.join(',');
+                const newKey = newList.join(',');
                 if (newKey !== activeContentKey) {
                     activeContentKey = newKey;
                     startSlideshow(newList);
@@ -57,7 +57,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // ── VIDEO PLAYER ─────────────────────────────────────────────────────────
     // We keep a single DOM element alive and swap src rather than
     // rebuilding innerHTML every call — this prevents GPU/memory churn.
-    let currentVideoEl  = null;
+    let currentVideoEl = null;
     let currentIframeEl = null;
 
     function playVideoUrl(url) {
@@ -68,7 +68,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (ytMatch) {
             const videoId = ytMatch[1];
-            const newSrc  = `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&controls=0&loop=1&playlist=${videoId}&rel=0`;
+            // Removed loop=1 and playlist=... because the 'playlist' parameter forces YouTube to show playlist controls (like 'Play Next' buttons).
+            // We are already using the YouTube JS API below to handle the looping seamlessly.
+            const origin = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://localhost';
+            const newSrc = `https://www.youtube.com/embed/${videoId}?enablejsapi=1&autoplay=1&mute=1&controls=0&rel=0&modestbranding=1&iv_load_policy=3&disablekb=1&playsinline=1&origin=${encodeURIComponent(origin)}`;
 
             // Reuse existing iframe if one already exists to avoid DOM thrash
             if (currentIframeEl && container.contains(currentIframeEl)) {
@@ -81,9 +84,10 @@ document.addEventListener('DOMContentLoaded', () => {
             // First time — clear container and build iframe
             clearContainer();
             const iframe = document.createElement('iframe');
-            iframe.src     = newSrc;
-            iframe.style.cssText = 'width:100%;height:100%;border:none;display:block;background:#000;opacity:0;transition:opacity 0.5s ease-in-out;';
-            iframe.allow   = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture';
+            iframe.src = newSrc;
+            // Make iframe taller than container and offset it to crop out YouTube's top/bottom overlays
+            iframe.style.cssText = 'width:100vw;height:120vh;margin-top:-10vh;border:none;display:block;background:#000;opacity:0;transition:opacity 0.2s ease-in-out;pointer-events:none;';
+            iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture';
             iframe.setAttribute('allowfullscreen', '');
 
             // Fade in via onload (most reliable for iframes) + rAF fallback
@@ -93,8 +97,55 @@ document.addEventListener('DOMContentLoaded', () => {
                 requestAnimationFrame(() => { iframe.style.opacity = '1'; })
             );
 
+            // Hook up YouTube API for seamless loop to avoid end-screen flashes
+            const hookYT = () => {
+                const player = new YT.Player(iframe, {
+                    events: {
+                        'onReady': (event) => {
+                            event.target.playVideo();
+                        },
+                        'onStateChange': (event) => {
+                            if (event.data === YT.PlayerState.PLAYING) {
+                                iframe.style.opacity = '1'; // Ensure it is visible when playing
+                                if (!iframe.ytInterval) {
+                                    iframe.ytInterval = setInterval(() => {
+                                        if (player.getCurrentTime && player.getDuration) {
+                                            const duration = player.getDuration();
+                                            const time = player.getCurrentTime();
+                                            if (duration > 0 && time >= duration - 0.4) {
+                                                // Trick: Seek to 0.1s instead of 0s. 
+                                                // Seeking to 0 triggers YouTube's "start" UI (big center play button and titles).
+                                                // Seeking to 0.1 bypasses the start state entirely for a seamless loop!
+                                                player.seekTo(0.1, true);
+                                            }
+                                        }
+                                    }, 100);
+                                }
+                            } else {
+                                clearInterval(iframe.ytInterval);
+                                iframe.ytInterval = null;
+                                // If video ended or somehow got paused (e.g. after seeking), force it to play again
+                                if (event.data === YT.PlayerState.ENDED || event.data === YT.PlayerState.PAUSED) {
+                                    player.playVideo();
+                                }
+                            }
+                        }
+                    }
+                });
+            };
+
+            if (window.YT && window.YT.Player) {
+                hookYT();
+            } else {
+                const oldReady = window.onYouTubeIframeAPIReady;
+                window.onYouTubeIframeAPIReady = () => {
+                    if (oldReady) oldReady();
+                    hookYT();
+                };
+            }
+
             currentIframeEl = iframe;
-            currentVideoEl  = null;
+            currentVideoEl = null;
             return;
         }
 
@@ -109,12 +160,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         clearContainer();
-        const video        = document.createElement('video');
-        video.src          = url;
-        video.autoplay     = true;
-        video.loop         = true;
-        video.muted        = true;
-        video.playsInline  = true;   // Prevents kiosk/mobile from hijacking fullscreen
+        const video = document.createElement('video');
+        video.src = url;
+        video.autoplay = true;
+        video.loop = true;
+        video.muted = true;
+        video.playsInline = true;   // Prevents kiosk/mobile from hijacking fullscreen
         video.style.cssText = 'width:100%;height:100%;object-fit:contain;display:block;opacity:0;transition:opacity 0.5s ease-in-out;';
         container.appendChild(video);
         requestAnimationFrame(() =>
@@ -122,7 +173,7 @@ document.addEventListener('DOMContentLoaded', () => {
         );
         video.play().catch(e => console.warn('Autoplay blocked:', e));
 
-        currentVideoEl  = video;
+        currentVideoEl = video;
         currentIframeEl = null;
     }
 
@@ -130,18 +181,18 @@ document.addEventListener('DOMContentLoaded', () => {
     // Explicitly nulls out each Image object after use to release memory.
     async function probeImages() {
         const extensions = ['png', 'jpg', 'jpeg', 'gif'];
-        const found      = [];
+        const found = [];
 
         for (let i = 1; i <= 100; i++) {
             let foundThisIndex = false;
 
             for (const ext of extensions) {
-                const path   = `${sourcePath}/${i}.${ext}?t=${Date.now()}`;
+                const path = `${sourcePath}/${i}.${ext}?t=${Date.now()}`;
                 const exists = await new Promise(resolve => {
-                    let probe    = new Image();
-                    probe.onload  = () => { probe = null; resolve(true);  };
+                    let probe = new Image();
+                    probe.onload = () => { probe = null; resolve(true); };
                     probe.onerror = () => { probe = null; resolve(false); };
-                    probe.src     = path;
+                    probe.src = path;
                 });
 
                 if (exists) {
@@ -162,7 +213,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Reuses a single <img> element — swaps src only — instead of destroying
     // and recreating a DOM node on every 5-second tick.
     let slideshowTimer = null;
-    let slideshowImg   = null;
+    let slideshowImg = null;
 
     function startSlideshow(playlist) {
 
@@ -189,7 +240,7 @@ document.addEventListener('DOMContentLoaded', () => {
             container.appendChild(slideshowImg);
         }
 
-        currentVideoEl  = null;
+        currentVideoEl = null;
         currentIframeEl = null;
 
         let idx = 0;
@@ -219,9 +270,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Safe container clear that nulls our element refs.
     function clearContainer() {
         container.innerHTML = '';
-        currentVideoEl  = null;
+        currentVideoEl = null;
         currentIframeEl = null;
-        slideshowImg    = null;
+        slideshowImg = null;
     }
 
     // ── INIT ─────────────────────────────────────────────────────────────────
