@@ -1,23 +1,6 @@
 document.addEventListener('DOMContentLoaded', () => {
 
-    // ── STABILITY: PERIODIC PAGE RELOAD ──────────────────────────────────────
-    // Randomise ±10 min so multiple screens don't all reload at the same time.
-    // We also wait for the page to be hidden (user not watching) when possible.
-    const BASE_RELOAD_MS   = 4 * 60 * 60 * 1000;          // 4 hours
-    const JITTER_MS        = Math.floor(Math.random() * 20 * 60 * 1000) - 10 * 60 * 1000;
-    const RELOAD_AFTER_MS  = BASE_RELOAD_MS + JITTER_MS;   // 3h50m – 4h10m
-
-    let reloadPending = false;
-    setTimeout(() => {
-        reloadPending = true;
-        // Reload immediately if the page is hidden (screen off / tab in background).
-        // Otherwise wait for the next content-swap moment (handled in playVideoUrl / startSlideshow).
-        if (document.visibilityState === 'hidden') {
-            window.location.reload();
-        }
-        // Fallback: force reload after another 10 minutes even if page stays visible.
-        setTimeout(() => window.location.reload(), 10 * 60 * 1000);
-    }, RELOAD_AFTER_MS);
+    // ── STABILITY: DISABLED (Run offline, do not reload) ─────────────────────
 
     // ── URL PARAMS ───────────────────────────────────────────────────────────
     const params     = new URLSearchParams(window.location.search);
@@ -28,8 +11,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!sourcePath) return;
 
     let activeContentKey = '';   // URL or image-list signature to detect changes
-    let fetchErrorCount  = 0;    // Consecutive fetch failures
-    const MAX_FETCH_ERRORS = 3;  // Soft-recover after this many in a row
     let currentMode      = type; // Track active display mode
 
     // ── WATCHER CORE ─────────────────────────────────────────────────────────
@@ -39,30 +20,23 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch(`${sourcePath}/url.txt?t=${Date.now()}`);
             if (res.ok) {
                 const url = (await res.text()).trim();
-                fetchErrorCount = 0;  // Reset on success
                 if (url) {
                     currentMode = 'video';
                     if (url !== activeContentKey) {
                         activeContentKey = url;
                         playVideoUrl(url);
-                    } else {
-                        // Same URL — check if the iframe/video has stalled
-                        checkForStall();
                     }
                     return; // Stop here if url.txt has a valid URL
                 }
             }
             
             // If url.txt doesn't exist or is empty, fallback to original type logic
-            fetchErrorCount = 0;
             if (type === 'video') {
                 currentMode = 'video';
                 const localUrl = `${sourcePath}/1.mp4`;
                 if (localUrl !== activeContentKey) {
                     activeContentKey = localUrl;
                     playVideoUrl(localUrl);
-                } else {
-                    checkForStall();
                 }
             } else {
                 currentMode = 'image';
@@ -75,47 +49,10 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         } catch (err) {
             console.warn('Update check failed:', err);
-            fetchErrorCount++;
-            if (fetchErrorCount >= MAX_FETCH_ERRORS) {
-                console.warn(`${MAX_FETCH_ERRORS} consecutive fetch errors — soft-recovering…`);
-                fetchErrorCount = 0;
-                softRecover();
-            }
         }
     }
 
-    // ── STALL DETECTION ──────────────────────────────────────────────────────
-    // Tracks the last time we swapped content. If the same URL has been
-    // showing for over 20 minutes we assume the iframe/video stalled and
-    // reload it in-place (no DOM flash, no full page reload).
-    let lastContentSwapTime = Date.now();
-    const STALL_THRESHOLD_MS = 20 * 60 * 1000; // 20 minutes
 
-    function markContentSwap() {
-        lastContentSwapTime = Date.now();
-    }
-
-    function checkForStall() {
-        const age = Date.now() - lastContentSwapTime;
-        if (age > STALL_THRESHOLD_MS) {
-            console.warn('Stall detected — reloading content in-place');
-            softRecover();
-        }
-    }
-
-    // Soft recovery: reload the current content without a full page reload.
-    function softRecover() {
-        if (!activeContentKey) return;
-        if (currentMode === 'video') {
-            const currentKey = activeContentKey;
-            activeContentKey = '';          // Force re-render
-            playVideoUrl(currentKey);
-        } else {
-            const currentKey  = activeContentKey;
-            activeContentKey  = '';
-            startSlideshow(currentKey.split(',').filter(Boolean));
-        }
-    }
 
     // ── VIDEO PLAYER ─────────────────────────────────────────────────────────
     // We keep a single DOM element alive and swap src rather than
@@ -124,8 +61,6 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentIframeEl = null;
 
     function playVideoUrl(url) {
-        markContentSwap();
-        if (reloadPending) { window.location.reload(); return; }
 
         const ytMatch = url.match(
             /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?|shorts)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i
@@ -230,8 +165,6 @@ document.addEventListener('DOMContentLoaded', () => {
     let slideshowImg   = null;
 
     function startSlideshow(playlist) {
-        markContentSwap();
-        if (reloadPending) { window.location.reload(); return; }
 
         if (slideshowTimer) {
             clearInterval(slideshowTimer);
